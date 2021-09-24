@@ -853,6 +853,9 @@ class PSG_Package:
                 version = ""
         self.version = version
 
+    def __str__(self):
+        return f"{self.name.upper()} - version ({self.version})"
+
     def update(self):
         result = self.sever.update_package(self.name)
         self.version = server.get_package_version(self.name)
@@ -870,6 +873,7 @@ class PSG_Package:
     def help(self):
         """ Return a formatted docstring """
         return self.__doc__
+
 
 
 class Programs_Package(PSG_Package):
@@ -1068,8 +1072,8 @@ class PSG:
         # Load the individual packages for object oriented interface
         versions = self.get_package_version()
         self.packages = {
-            name: cls(self, versions.get(name, ""))
-            for name, cls in self._packages.items()
+            name: cls(self, versions[name.upper()])
+            for name, cls in self._packages.items() if name.upper() in versions.keys()
         }
 
     @property
