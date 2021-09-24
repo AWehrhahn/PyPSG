@@ -27,7 +27,10 @@ ppb = u.def_unit(
     ["ppb", "ppbv"], 1e-9 * u.one, namespace=globals(), doc="Parts Per Billion"
 )
 ppm = u.def_unit(
-    ["ppm", "ppmv"], 1e3 * ppb, namespace=globals(), doc="Parts Per Million Volume"
+    ["ppm", "ppmv", "ppv"],
+    1e3 * ppb,
+    namespace=globals(),
+    doc="Parts Per Million Volume",
 )
 ppt = u.def_unit(
     ["ppt", "pptv"], 1e6 * ppb, namespace=globals(), doc="Parts Per Thousand Volume"
@@ -35,8 +38,18 @@ ppt = u.def_unit(
 m2 = u.def_unit(
     ["m2", "m-2"], None, namespace=globals(), doc="Molecules per square meter"
 )
+diameter = u.def_unit(
+    ["diameter"], None, namespace=globals(), doc="Diameter of the telescope"
+)
+diffrac = u.def_unit(
+    ["diffrac"],
+    None,
+    namespace=globals(),
+    doc="defined by the telescope diameter and center wavelength",
+)
+
 scl = u.def_unit(["scl"], None, namespace=globals(), doc="Relative Scale")
-u.add_enabled_units([ppb, ppm, ppt, m2, scl])
+u.add_enabled_units([ppb, ppm, ppt, m2, scl, diameter, diffrac])
 
 # Package Name for the Astropy cache
 PKGNAME = "planet-spectrum-generator"
@@ -49,65 +62,129 @@ class PSG_Config:
         for key, value in config.items():
             self.other[key] = value
 
+    @staticmethod
+    def get_value(config, key, func=None):
+        try:
+            value = config[key]
+            if func is not None:
+                value = func(value)
+        except KeyError:
+            value = None
+        return value
+
+    def get_quantity(self, config, key, unit):
+        return self.get_value(config, key, lambda x: float(x) * unit)
+
+    def get_bool(self, config, key, true_value="Y"):
+        return self.get_value(config, key, lambda x: x == true_value)
+
+    def get_list(self, config, key, func=None, array=False, sep=","):
+        value = self.get_value(config, key, lambda x: x.split(","))
+        if value is None:
+            return None
+        if func is not None:
+            value = [func(v) for v in value]
+        if array:
+            value = np.array(value)
+        return value
+
+    @staticmethod
+    def parse_units(unit, units, names):
+        if unit is None:
+            return None
+        for u, n in zip(units, names):
+            if unit == n:
+                return u
+        raise ValueError("Could not parse unit")
+
+    @staticmethod
+    def get_units(unit, units, names):
+        if unit is None:
+            return None, None
+        for un, n in zip(units, names):
+            if unit == un:
+                return un, n
+
+        for un, n in zip(units, names):
+            try:
+                unit.to(un)
+                return un, n
+            except u.core.UnitConversionError:
+                continue
+        raise ValueError("Could not determine units")
+
     def to_config(self):
         return self.other
+
 
 class PSG_Object(PSG_Config):
     def __init__(self, config) -> None:
         #:str: Object type (e.g., Exoplanet, Planet, Asteroid, Moon, Comet, Object)
-        self.object = config["OBJECT"]
+        self.object = config.get("OBJECT")
         #:str: Object name
-        self.name = config["OBJECT-NAME"]
+        self.name = config.get("OBJECT-NAME")
         # Datetime
-        match = re.match(r"(\d{4})/(\d{2})/(\d{2}) (\d{2}):(\d{2})", config["OBJECT-DATE"])
+        if "OBJECT-DATE" in config.keys():
+            match = re.match(
+                r"(\d{4})/(\d{2})/(\d{2}) (\d{2}):(\d{2})", config["OBJECT-DATE"]
+            )
+            date = datetime(
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3)),
+                int(match.group(4)),
+                int(match.group(5)),
+            )
+        else:
+            date = None
         #:datetime: Date of the observation (yyyy/mm/dd hh:mm) in Universal time [UT]
-        self.date = datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4)), int(match.group(5)))
+        self.date = date
         #:Quantity: Diameter of the object [km]
-        self.diameter = float(config["OBJECT-DIAMETER"]) * u.km
+        self.diameter = self.get_quantity(config, "OBJECT-DIAMETER", u.km)
         # Gravity
-        gravity_unit = config["OBJECT-GRAVITY-UNIT"]
-        if gravity_unit == "g": # Surface Gravity
-            gravity_unit = u.m/u.s**2
-        elif gravity_unit == "rho": # Mean Density
-            gravity_unit = u.g/u.cm**3
-        elif gravity_unit == "kg": # Total Mass
+        gravity_unit = config.get("OBJECT-GRAVITY-UNIT")
+        if gravity_unit == "g":  # Surface Gravity
+            gravity_unit = u.m / u.s ** 2
+        elif gravity_unit == "rho":  # Mean Density
+            gravity_unit = u.g / u.cm ** 3
+        elif gravity_unit == "kg":  # Total Mass
             gravity_unit = u.kg
         #:Quantity: Gravity/density/mass of the object
-        self.gravity = float(config["OBJECT-GRAVITY"]) * gravity_unit
+        self.gravity = self.get_quantity(config, "OBJECT-GRAVITY", gravity_unit)
         #:Quantity: Distance of the planet to the Sun [AU], and for exoplanets the semi-major axis [AU]
-        self.star_distance = float(config["OBJECT-STAR-DISTANCE"]) * u.AU
+        self.star_distance = self.get_quantity(config, "OBJECT-STAR-DISTANCE", u.AU)
         #:Quantity: Velocity of the planet to the Sun [km/s], and for exoplanets the RV amplitude [km/s]
-        self.star_velocity = float(config["OBJECT-STAR-VELOCITY"]) * (u.km / u.s)
+        self.star_velocity = self.get_quantity(config, "OBJECT-STAR-VELOCITY", (u.km / u.s))
         #:Quantity: Sub-solar east longitude [degrees]
-        self.solar_longitude = float(config["OBJECT-SOLAR-LONGITUDE"]) * u.deg
+        self.solar_longitude = self.get_quantity(config, "OBJECT-SOLAR-LONGITUDE", u.deg)
         #:Quantity: Sub-solar latitude [degrees]
-        self.solar_latitude = float(config["OBJECT-SOLAR-LATITUDE"]) * u.deg
+        self.solar_latitude = self.get_quantity(config, "OBJECT-SOLAR-LATITUDE", u.deg)
         #:Quantity: Angular parameter (season/phase) that defines the position of the planet moving along its Keplerian orbit. For exoplanets, 0:Secondary transit, 180:Primary transit, 90/270:Opposition. For solar-system bodies, 0:'N spring equinox', 90:'N summer solstice', 180:'N autumn equinox', 270:'N winter solstice' [degrees]
-        self.season = float(config["OBJECT-SEASON"]) * u.deg
+        self.season = self.get_quantity(config, "OBJECT-SEASON", u.deg)
         #:Quantity: Orbital inclination [degree], mainly relevant for exoplanets. Zero is phase on, 90 is a transiting orbit
-        self.inclination = float(config["OBJECT-INCLINATION"]) * u.deg
+        self.inclination = self.get_quantity(config, "OBJECT-INCLINATION", u.deg)
         #:float: Orbital eccentricity, mainly relevant for exoplanets
-        self.eccentricity = float(config["OBJECT-ECCENTRICITY"])
+        self.eccentricity = self.get_value(config, "OBJECT-ECCENTRICITY", float)
         #:Quantity: Orbital longitude of periapse [degrees]. It indicates the phase at which the planet reaches periapsis
-        self.periapsis = float(config["OBJECT-PERIAPSIS"]) * u.deg
+        self.periapsis = self.get_quantity(config, "OBJECT-PERIAPSIS", u.deg)
         #:str: Stellar type of the parent star [O/B/A/F/G/K/M]
-        self.star_type = config["OBJECT-STAR-TYPE"]
+        self.star_type = config.get("OBJECT-STAR-TYPE")
         #:Quantity:  Temperature of the parent star [K]
-        self.star_temperature = float(config["OBJECT-STAR-TEMPERATURE"]) * u.K
+        self.star_temperature = self.get_quantity(config, "OBJECT-STAR-TEMPERATURE", u.K)
         #:Quantity: Radius of the parent star [Rsun]
-        self.star_radius = float(config["OBJECT-STAR-RADIUS"]) * u.Rsun
+        self.star_radius = self.get_quantity(config, "OBJECT-STAR-RADIUS", u.Rsun)
         #:float: Metallicity of the parent star and object with respect to the Sun in log [dex]
-        self.star_metallicity = float(config["OBJECT-STAR-METALLICITY"])
+        self.star_metallicity = self.get_value(config, "OBJECT-STAR-METALLICITY", float)
         #:Quantity: Sub-observer east longitude [degrees]
-        self.obs_longitude = float(config["OBJECT-OBS-LONGITUDE"]) * u.deg
+        self.obs_longitude = self.get_quantity(config, "OBJECT-OBS-LONGITUDE", u.deg)
         #:Quantity: Sub-observer latitude, for exoplanets inclination [degrees]
-        self.obs_latitude = float(config["OBJECT-OBS-LATITUDE"]) * u.deg
+        self.obs_latitude = self.get_quantity(config, "OBJECT-OBS-LATITUDE", u.deg)
         #:Quantity: Relative velocity between the observer and the object [km/s]
-        self.obs_velocity = float(config["OBJECT-OBS-VELOCITY"]) * (u.km/u.s)
+        self.obs_velocity = self.get_quantity(config, "OBJECT-OBS-VELOCITY", u.km / u.s)
         #:Quantity: This field is computed by the geometry module - It is the apparent rotational period of the object as seen from the observer [days]
-        self.period = float(config["OBJECT-PERIOD"]) * u.day
+        self.period = self.get_quantity(config, "OBJECT-PERIOD", u.day)
         #:str: This field reports the orbital parameters for small bodies. It is only relevant for display purposes of the orbital diagram.
-        self.orbit = config.get("OBJECT-ORBIT", "")
+        self.orbit = config.get("OBJECT-ORBIT")
 
     @property
     def gravity_unit(self):
@@ -115,114 +192,88 @@ class PSG_Object(PSG_Config):
         return self.gravity.unit
 
     def to_config(self):
-        try:
-            gravity = self.gravity.to_value(u.m/u.s**2)
-            gravity_unit = "g"
-        except u.core.UnitConversionError:
-            try:
-                gravity = self.gravity.to_value(u.g/u.cm**3)
-                gravity_unit = "rho"
-            except u.core.UnitConversionError:
-                try:
-                    gravity = self.gravity.to_value(u.kg)
-                    gravity_unit = "kg"
-                except u.core.UnitConversionError:
-                    raise ValueError("Can not convert the gravity units to PSG units")
+        gravity_unit_loc, gravity_unit = self.get_units(
+            self.gravity_unit,
+            [u.m / u.s ** 2, u.g / u.cm ** 3, u.kg],
+            ["g", "rho", "kg"],
+        )
 
         config = {
-            "OBJECT" : self.object,
+            "OBJECT": self.object,
             "OBJECT-NAME": self.name,
-            "OBJECT-DATE": f"{self.date.year:04}/{self.date.month:02}/{self.date.day:02} {self.date.hour:02}:{self.date.minute:02}",
-            "OBJECT-DIAMETER": self.diameter.to_value(u.km),
-            "OBJECT-GRAVITY": gravity,
+            "OBJECT-DATE": f"{self.date.year:04}/{self.date.month:02}/{self.date.day:02} {self.date.hour:02}:{self.date.minute:02}" if self.date is not None else None,
+            "OBJECT-DIAMETER": self.diameter.to_value(u.km) if self.diameter is not None else None,
+            "OBJECT-GRAVITY": self.gravity.to_value(gravity_unit_loc) if self.gravity is not None and gravity_unit_loc is not None else None,
             "OBJECT-GRAVITY-UNIT": gravity_unit,
-            "OBJECT-STAR-DISTANCE": self.star_distance.to_value(u.AU),
-            "OBJECT-STAR-VELOCITY": self.star_velocity.to_value(u.km/u.s),
-            "OBJECT-SOLAR-LONGITUDE": self.solar_longitude.to_value(u.deg),
-            "OBJECT-SOLAR-LATITUDE": self.solar_latitude.to_value(u.deg),
-            "OBJECT-SEASON": self.season.to_value(u.deg),
-            "OBJECT-INCLINATION": self.inclination.to_value(u.deg),
+            "OBJECT-STAR-DISTANCE": self.star_distance.to_value(u.AU) if self.star_distance is not None else None,
+            "OBJECT-STAR-VELOCITY": self.star_velocity.to_value(u.km / u.s) if self.star_velocity is not None else None,
+            "OBJECT-SOLAR-LONGITUDE": self.solar_longitude.to_value(u.deg) if self.solar_longitude is not None else None,
+            "OBJECT-SOLAR-LATITUDE": self.solar_latitude.to_value(u.deg) if self.solar_latitude is not None else None,
+            "OBJECT-SEASON": self.season.to_value(u.deg) if self.season is not None else None,
+            "OBJECT-INCLINATION": self.inclination.to_value(u.deg) if self.inclination is not None else None,
             "OBJECT-ECCENTRICITY": self.eccentricity,
-            "OBJECT-PERIAPSIS": self.periapsis.to_value(u.deg),
+            "OBJECT-PERIAPSIS": self.periapsis.to_value(u.deg) if self.periapsis is not None else None,
             "OBJECT-STAR-TYPE": self.star_type,
-            "OBJECT-STAR-TEMPERATURE": self.star_temperature.to_value(u.K),
-            "OBJECT-STAR-RADIUS": self.star_radius.to_value(u.Rsun),
+            "OBJECT-STAR-TEMPERATURE": self.star_temperature.to_value(u.K) if self.star_temperature is not None else None,
+            "OBJECT-STAR-RADIUS": self.star_radius.to_value(u.Rsun) if self.star_radius is not None else None,
             "OBJECT-STAR-METALLICITY": self.star_metallicity,
-            "OBJECT-OBS-LONGITUDE": self.obs_longitude.to_value(u.deg),
-            "OBJECT-OBS-LATITUDE": self.obs_latitude.to_value(u.deg),
-            "OBJECT-OBS-VELOCITY": self.obs_velocity.to_value(u.km/u.s),
-            "OBJECT-PERIOD": self.period.to_value(u.day),
-            "OBJECT-ORBIT": self.orbit
+            "OBJECT-OBS-LONGITUDE": self.obs_longitude.to_value(u.deg) if self.obs_longitude is not None else None,
+            "OBJECT-OBS-LATITUDE": self.obs_latitude.to_value(u.deg) if self.obs_latitude is not None else None,
+            "OBJECT-OBS-VELOCITY": self.obs_velocity.to_value(u.km / u.s) if self.obs_velocity is not None else None,
+            "OBJECT-PERIOD": self.period.to_value(u.day) if self.period is not None else None,
+            "OBJECT-ORBIT": self.orbit,
         }
-        config = {k:str(v) for k, v in config.items()}
+        config = {k: str(v) for k, v in config.items() if v is not None}
         return config
+
 
 class PSG_Geometry(PSG_Config):
     def __init__(self, config) -> None:
         #:str: Type of observing geometry
-        self.geometry = config["GEOMETRY"]
+        self.geometry = config.get("GEOMETRY")
         #:str: Reference geometry (e.g., ExoMars, Maunakea), default is user defined or 'User'
-        self.ref = config["GEOMETRY-REF"]
+        self.ref = config.get("GEOMETRY-REF")
 
-        offset_unit = config["GEOMETRY-OFFSET-UNIT"]
-        if offset_unit == "arcsec": 
-            offset_unit = u.arcsec
-        elif offset_unit == "arcmin":
-            offset_unit = u.arcmin
-        elif offset_unit == "degree":
-            offset_unit = u.deg
-        elif offset_unit == "km":
-            offset_unit = u.km
-        elif offset_unit == "diameter":
-            offset_unit = u.one
-        else:
-            raise ValueError("GEOMETRY-OFFSET-UNIT not recognized")
+        offset_unit = config.get("GEOMETRY-OFFSET-UNIT")
+        offset_unit = self.parse_units(offset_unit, [u.arcsec, u.arcmin, u.deg, u.km, u.one],
+            ["arcsec", "arcmin", "degree", "km", "diameter"],)
         #:quantity: Vertical offset with respect to the sub-observer location
-        self.offset_ns = float(config["GEOMETRY-OFFSET-NS"]) * offset_unit
+        self.offset_ns = self.get_quantity(config, "GEOMETRY-OFFSET-NS", offset_unit)
         #:quantity: Horizontal offset with respect to the sub-observer location
-        self.offset_ew = float(config["GEOMETRY-OFFSET-EW"]) * offset_unit
-        
-        altitude_unit = config["GEOMETRY-ALTITUDE-UNIT"]
-        if altitude_unit == "AU": 
-            altitude_unit = u.AU
-        elif altitude_unit == "km":
-            altitude_unit = u.km
-        elif altitude_unit == "diameter":
-            altitude_unit = u.one
-        elif altitude_unit == "pc":
-            altitude_unit = u.pc
-        else:
-            raise ValueError("GEOMETRY-ALTITUDE-UNIT not recognized")
+        self.offset_ew = self.get_quantity(config, "GEOMETRY-OFFSET-EW", offset_unit)
+
+        altitude_unit = config.get("GEOMETRY-ALTITUDE-UNIT")
+        altitude_unit = self.parse_units(altitude_unit, [u.AU, u.km, u.one, u.pc], ["AU", "km", "diameter", "pc"])
         #:quantity: Distance between the observer and the surface of the planet
-        self.obs_altitude = float(config["GEOMETRY-OBS-ALTITUDE"]) * altitude_unit
+        self.obs_altitude = self.get_quantity(config, "GEOMETRY-OBS-ALTITUDE", altitude_unit)
         #:quantity: The azimuth angle between the observational projected vector and the solar vector on the reference plane
-        self.azimuth = float(config["GEOMETRY-AZIMUTH"]) * u.deg
+        self.azimuth = self.get_quantity(config, "GEOMETRY-AZIMUTH", u.deg)
         #:float: Parameter for the selected geometry, for Nadir / Lookingup this field indicates the zenith angle [degrees], for limb / occultations this field indicates the atmospheric height [km] being sampled
-        self.user_param = float(config["GEOMETRY-USER-PARAM"])
+        self.user_param = self.get_value(config, "GEOMETRY-USER-PARAM", float)
         #:str: For stellar occultations, this field indicates the type of the occultation star [O/B/A/F/G/K/M]
-        self.stellar_type = config["GEOMETRY-STELLAR-TYPE"]
+        self.stellar_type = config.get("GEOMETRY-STELLAR-TYPE")
         #:quantity: For stellar occultations, this field indicates the temperature [K] of the occultation star
-        self.stellar_temperature = float(config["GEOMETRY-STELLAR-TEMPERATURE"]) * u.K
+        self.stellar_temperature = self.get_quantity(config, "GEOMETRY-STELLAR-TEMPERATURE", u.K)
         #:quantity: For stellar occultations, this field indicates the brightness [magnitude] of the occultation star
-        self.stellar_magnitude = float(config["GEOMETRY-STELLAR-MAGNITUDE"]) * u.mag
+        self.stellar_magnitude = self.get_quantity(config, "GEOMETRY-STELLAR-MAGNITUDE", u.mag)
         #:str: This field is computed by the geometry module - It indicates the angle between the observer and the planetary surface
-        self.obs_angle = config["GEOMETRY-OBS-ANGLE"]
+        self.obs_angle = config.get("GEOMETRY-OBS-ANGLE")
         #:str: This field is computed by the geometry module - It indicates the angle between the Sun and the planetary surface
-        self.solar_angle = config["GEOMETRY-SOLAR-ANGLE"]
+        self.solar_angle = config.get("GEOMETRY-SOLAR-ANGLE")
         #:int: This field allows to divide the observable disk in finite rings so radiative-transfer calculations are performed with higher accuracy
-        self.disk_angles = int(config["GEOMETRY-DISK-ANGLES"])
+        self.disk_angles = int(config.get("GEOMETRY-DISK-ANGLES"))
         #:quantity: This field is computed by the geometry module - It indicates the phase between the Sun and observer
-        self.phase = float(config["GEOMETRY-PHASE"]) * u.deg
+        self.phase = self.get_quantity(config, "GEOMETRY-PHASE", u.deg)
         #:str: This field is computed by the geometry module - It indicates how much the beam fills the planetary area (1:maximum)
-        self.planet_fraction = config["GEOMETRY-PLANET-FRACTION"]
+        self.planet_fraction = config.get("GEOMETRY-PLANET-FRACTION")
         #:float: This field is computed by the geometry module - It indicates how much the beam fills the parent star (1:maximum)
-        self.star_fraction = float(config["GEOMETRY-STAR-FRACTION"])
+        self.star_fraction = self.get_value(config, "GEOMETRY-STAR-FRACTION", float)
         #:float: This field is computed by the geometry module - It indicates the projected distance between the beam and the parent star in arcsceconds
-        self.star_distance = float(config["GEOMETRY-STAR-DISTANCE"])
+        self.star_distance = self.get_value(config, "GEOMETRY-STAR-DISTANCE", float)
         #:str: This field is computed by the geometry module - It indicates the rotational Doppler shift [km/s] affecting the spectra and the spread of rotational velocities [km/s] within the FOV
-        self.rotation = config["GEOMETRY-ROTATION"]
+        self.rotation = config.get("GEOMETRY-ROTATION")
         #:str: This field is computed by the geometry module - It indicates the scaling factor between the integrated reflectance for the FOV with respect to the BRDF as computed using the geometry indidence/emission angles
-        self.brdfscaler = config["GEOMETRY-BRDFSCALER"]
+        self.brdfscaler = config.get("GEOMETRY-BRDFSCALER")
 
     @property
     def offset_unit(self):
@@ -235,80 +286,43 @@ class PSG_Geometry(PSG_Config):
         return self.obs_altitude.unit
 
     def to_config(self):
-        if self.offset_unit == u.arcsec:
-            offset_unit = "arcsec"
-            loc_offset_unit = u.arcsec
-        elif self.offset_unit == u.arcmin:
-            offset_unit = "arcmin"
-            loc_offset_unit = u.arcmin
-        elif self.offset_unit == u.deg:
-            offset_unit = "degree"
-            loc_offset_unit = u.deg
-        else:
-            try:
-                self.offset_unit.to(u.arcsec)
-                offset_unit = "arcsec"
-                loc_offset_unit = u.arcsec
-            except u.core.UnitConversionError:
-                try:
-                    self.offset_unit.to(u.km)
-                    offset_unit = "km"
-                    loc_offset_unit = u.km
-                except u.core.UnitConversionError:
-                    try:
-                        self.offset_unit.to(u.one)
-                        offset_unit = "diameter"
-                        loc_offset_unit = u.one
-                    except u.core.UnitConversionError:
-                        raise ValueError("Could not determine the offset unit")
-
-        if self.altitude_unit == u.AU:
-            altitude_unit = "AU"
-            loc_altitude_unit = u.AU
-        elif self.altitude_unit == u.km:
-            altitude_unit = "km"
-            loc_altitude_unit = u.km
-        elif self.altitude_unit == u.pc:
-            altitude_unit = "pc"
-            loc_altitude_unit = u.pc
-        else:
-            try:
-                self.altitude_unit.to(u.km)
-                altitude_unit = "km"
-                loc_altitude_unit = u.km
-            except u.core.UnitConversionError:
-                try:
-                    self.altitude_unit.to(u.one)
-                    altitude_unit = "diameter"
-                    loc_altitude_unit = u.one
-                except u.core.UnitConversionError:
-                    raise ValueError("Could not recognize altitude units")
+        loc_offset_unit, offset_unit = self.get_units(
+            self.offset_unit,
+            [u.arcsec, u.arcmin, u.deg, u.km, u.one],
+            ["arcsec", "arcmin", "degree", "km", "diameter"],
+        )
+        loc_altitude_unit, altitude_unit = self.get_units(
+            self.altitude_unit,
+            [u.AU, u.km, u.pc, u.one],
+            ["AU", "km", "pc", "diameter"],
+        )
 
         config = {
             "GEOMETRY": self.geometry,
             "GEOMETRY-REF": self.ref,
-            "GEOMETRY-OFFSET-NS" : self.offset_ns.to_value(loc_offset_unit),
-            "GEOMETRY-OFFSET-EW" : self.offset_ew.to_value(loc_offset_unit),
+            "GEOMETRY-OFFSET-NS": self.offset_ns.to_value(loc_offset_unit) if self.offset_ns is not None and loc_offset_unit is not None else None,
+            "GEOMETRY-OFFSET-EW": self.offset_ew.to_value(loc_offset_unit) if self.offset_ew is not None and loc_offset_unit is not None else None,
             "GEOMETRY-OFFSET-UNIT": offset_unit,
-            "GEOMETRY-OBS-ALTITUDE": self.obs_altitude.to_value(loc_altitude_unit),
+            "GEOMETRY-OBS-ALTITUDE": self.obs_altitude.to_value(loc_altitude_unit) if self.obs_altitude is not None and loc_altitude_unit is not None else None,
             "GEOMETRY-ALTITUDE-UNIT": altitude_unit,
-            "GEOMETRY-AZIMUTH": self.azimuth.to_value(u.deg),
+            "GEOMETRY-AZIMUTH": self.azimuth.to_value(u.deg) if self.azimuth is not None else None,
             "GEOMETRY-USER-PARAM": self.user_param,
             "GEOMETRY-STELLAR-TYPE": self.stellar_type,
-            "GEOMETRY-STELLAR-TEMPERATURE": self.stellar_temperature.to_value(u.K),
-            "GEOMETRY-STELLAR-MAGNITUDE": self.stellar_magnitude.to_value(u.mag),
+            "GEOMETRY-STELLAR-TEMPERATURE": self.stellar_temperature.to_value(u.K) if self.stellar_temperature is not None else None,
+            "GEOMETRY-STELLAR-MAGNITUDE": self.stellar_magnitude.to_value(u.mag) if self.stellar_magnitude is not None else None,
             "GEOMETRY-OBS-ANGLE": self.obs_angle,
             "GEOMETRY-SOLAR-ANGLE": self.solar_angle,
             "GEOMETRY-DISK-ANGLES": self.disk_angles,
-            "GEOMETRY-PHASE": self.phase.to_value(u.deg),
+            "GEOMETRY-PHASE": self.phase.to_value(u.deg) if self.phase is not None else None,
             "GEOMETRY-PLANET-FRACTION": self.planet_fraction,
             "GEOMETRY-STAR-FRACTION": self.star_fraction,
             "GEOMETRY-STAR-DISTANCE": self.star_distance,
             "GEOMETRY-ROTATION": self.rotation,
-            "GEOMETRY-BRDFSCALER": self.brdfscaler
+            "GEOMETRY-BRDFSCALER": self.brdfscaler,
         }
-        config = {k: str(v) for k, v in config.items()}
+        config = {k: str(v) for k, v in config.items() if v is not None}
         return config
+
 
 class PSG_Atmosphere(PSG_Config):
     # from https://hitran.org/docs/molec-meta/
@@ -368,124 +382,87 @@ class PSG_Atmosphere(PSG_Config):
 
     def __init__(self, config) -> None:
         # Handle the component molecules
-        self._gas = (
-            config["ATMOSPHERE-GAS"].split(",")
-            if "ATMOSPHERE-GAS" in config.keys()
-            else []
-        )
+        self._gas = self.get_list(config, "ATMOSPHERE-GAS")
         #:list(str): Sub-type of the gases, e.g. 'HIT[1], HIT[2]'
-        self.type = (
-            config["ATMOSPHERE-TYPE"].split(",")
-            if "ATMOSPHERE-TYPE" in config.keys()
-            else []
-        )
-        abun = (
-            [float(v) for v in config["ATMOSPHERE-ABUN"].split(",")]
-            if "ATMOSPHERE-ABUN" in config.keys()
-            else []
-        )
-        unit = (
-            [u.Unit(v) for v in config["ATMOSPHERE-UNIT"].split(",")]
-            if "ATMOSPHERE-UNIT" in config.keys()
-            else []
-        )
+        self.type = self.get_list(config, "ATMOSPHERE-TYPE")
+        abun = self.get_list(config, "ATMOSPHERE-ABUN", func=float)
+        unit = self.get_list(config, "ATMOSPHERE-UNIT", func=u.Unit)
         #:list(quantity): Abundance of gases. The values can be assumed to be same across all altitudes/layers [%,ppmv,ppbv,pptv,m-2], or as a multiplier [scl] to the provided vertical profile
-        self.abun = [a * u for a, u in zip(abun, unit)]
+        self.abun = [a * u for a, u in zip(abun, unit)] if abun is not None and unit is not None else None
 
         # Handle the Aerosols
-        self._aeros = (
-            config["ATMOSPHERE-AEROS"].split(",")
-            if "ATMOSPHERE-AEROS" in config.keys()
-            else []
-        )
+        self._aeros = self.get_list(config, "ATMOSPHERE-AEROS")
         #:list(str): Sub-type of the aerosols
-        self.atype = (
-            config["ATMOSPHERE-ATYPE"].split(",")
-            if "ATMOSPHERE-ATYPE" in config.keys()
-            else []
-        )
-        abun = (
-            [float(v) for v in config["ATMOSPHERE-AABUN"].split(",")]
-            if "ATMOSPHERE-AABUN" in config.keys()
-            else []
-        )
-        unit = (
-            [u.Unit(v) for v in config["ATMOSPHERE-AUNIT"].split(",")]
-            if "ATMOSPHERE-AUNIT" in config.keys()
-            else []
-        )
+        self.atype = self.get_list(config, "ATMOSPHERE-ATYPE")
+        abun = self.get_list(config, "ATMOSPHERE-AABUN", func=float)
+        unit = self.get_list(config, "ATMOSPHERE-AUNIT", func=u.Unit)
         #:list(quantity): Abundance of aerosols. The values can be assumed to be same across all altitudes/layers [%,ppm,ppb,ppt,Kg/m2], or as a multiplier [scaler] to the provided vertical profile
-        self.aabun = [a * u for a, u in zip(abun, unit)]
-        size = (
-            [float(v) for v in config["ATMOSPHERE-ASIZE"].split(",")]
-            if "ATMOSPHERE-ASIZE" in config.keys()
-            else []
-        )
-        unit = (
-            [u.Unit(v) for v in config["ATMOSPHERE-ASUNI"].split(",")]
-            if "ATMOSPHERE-ASUNI" in config.keys()
-            else []
-        )
+        self.aabun = [a * u for a, u in zip(abun, unit)] if abun is not None and unit is not None else None
+        size = self.get_list(config, "ATMOSPHERE-ASIZE", func=float)
+        unit = self.get_list(config, "ATMOSPHERE-ASUNI", func=float)
         #:list(quantity): Effective radius of the aerosol particles. The values can be assumed to be same across all layers [um, m, log(um)], or as a multiplier [scaler] to the provided size vertical profile
-        self.asize = [a * u for a, u in zip(size, unit)]
+        self.asize = [a * u for a, u in zip(size, unit)] if size is not None and unit is not None else None
 
         # Handle the atmosphere layers
         #:list(str): Molecules quantified by the vertical profile
-        self.layers_molecules = (
-            config["ATMOSPHERE-LAYERS-MOLECULES"].split(",")
-            if "ATMOSPHERE-LAYERS-MOLECULES" in config.keys()
-            else []
-        )
-        nlayers = int(config.get("ATMOSPHERE-LAYERS", 0))
-        layers = [config[f"ATMOSPHERE-LAYER-{i}"] for i in range(1, nlayers + 1)]
-        layers = StringIO("\n".join(layers))
+        self.layers_molecules = self.get_list(config, "ATMOSPHERE-LAYERS-MOLECULES")
+        nlayers = self.get_value(config, "ATMOSPHERE-LAYERS", int)
+        if nlayers is not None:
+            try:
+                layers = [config[f"ATMOSPHERE-LAYER-{i}"] for i in range(1, nlayers + 1)]
+                layers = StringIO("\n".join(layers))
+                layers = np.genfromtxt(layers, delimiter=",")
+            except KeyError:
+                layers = None
+        else:
+            layers = None
         #:array: Values for that specific layer: Pressure[bar], Temperature[K], gases[mol/mol], aerosols [kg/kg] - Optional fields: Altitude[km], X_size[m, aerosol X particle size]
-        self.layer = np.genfromtxt(layers, delimiter=",")
+        self.layer = layers
         #:str: Parameters defining the 3D General Circulation Model grid: num_lons, num_lats, num_alts, lon0, lat0, delta_lon, delta_lat, variables (csv)
-        self.gcm_parameters = config.get("ATMOSPHERE-GCM-PARAMETERS", "")
+        self.gcm_parameters = config.get("ATMOSPHERE-GCM-PARAMETERS")
         #:str: The structure of the atmosphere, None / Equilibrium:'Hydrostatic equilibrium' / Coma:'Cometary expanding coma'
-        self.structure = config["ATMOSPHERE-STRUCTURE"]
+        self.structure = config.get("ATMOSPHERE-STRUCTURE")
         #:float: For equilibrium atmospheres, this field defines the surface pressure; while for cometary coma, this field indicates the gas production rate
-        self.pressure = float(config["ATMOSPHERE-PRESSURE"])
+        self.pressure = self.get_value(config, "ATMOSPHERE-PRESSURE", float)
         #:str: The unit of the ATMOSPHERE-PRESSURE field, Pa:Pascal / bar / kbar / mbar / ubar / at / atm / torr / psi / gas:'molecules / second' / gasau:'molecules / second at rh=1AU'
-        self.punit = config["ATMOSPHERE-PUNIT"]
-        #:float: For atmospheres without a defined P/T profile, this field indicates the temperature across all altitudes
-        self.temperature = float(config.get("ATMOSPHERE-TEMPERATURE", 0))
+        self.punit = config.get("ATMOSPHERE-PUNIT")
+        #:quantity: For atmospheres without a defined P/T profile, this field indicates the temperature across all altitudes
+        self.temperature = self.get_quantity(config, "ATMOSPHERE-TEMPERATURE", u.K)
         #:float: Molecular weight of the atmosphere [g/mol] or expansion velocity [m/s] for expanding atmospheres
-        self.weight = float(config["ATMOSPHERE-WEIGHT"])
+        self.weight = self.get_value(config, "ATMOSPHERE-WEIGHT", float)
         #:str: Continuum processes to be included in the calculation
-        self.continuum = config.get("ATMOSPHERE-CONTINUUM", "")
+        self.continuum = config.get("ATMOSPHERE-CONTINUUM")
         #:str: For expanding cometary coma, this field indicates the photodissociation lifetime of the molecules [s]
-        self.tau = config.get("ATMOSPHERE-TAU", "")
+        self.tau = config.get("ATMOSPHERE-TAU")
         #:int: When performing scattering aerosols calculations, this parameter indicates the number of n-stream pairs - Use 0 for extinction calculations only (e.g. transit, occultation)
-        self.nmax = int(config.get("ATMOSPHERE-NMAX", 0))
+        self.nmax = self.get_value(config, "ATMOSPHERE-NMAX", int)
         #:int: When performing scattering aerosols calculations, this parameter indicates the number of scattering Legendre polynomials used for describing the phase function - Use 0 for extinction calculations only (e.g. transit, occultation)
-        self.lmax = int(config.get("ATMOSPHERE-LMAX", 0))
+        self.lmax = self.get_value(config, "ATMOSPHERE-LMAX", int)
         #:str: Description establishing the source/reference for the vertical profile
-        self.description = config["ATMOSPHERE-DESCRIPTION"]
+        self.description = config.get("ATMOSPHERE-DESCRIPTION")
 
     def to_config(self):
         config = {
             "ATMOSPHERE-NGAS": self.ngas,
-            "ATMOSPHERE-GAS": ",".join([str(v) for v in self.gas]),
-            "ATMOSPHERE-TYPE": ",".join([str(v) for v in self.type]),
-            "ATMOSPHERE-ABUN": ",".join([str(v.value) for v in self.abun]),
-            "ATMOSPHERE-UNIT": ",".join([str(v.unit) for v in self.abun]),
+            "ATMOSPHERE-GAS": ",".join([str(v) for v in self.gas]) if self.gas is not None else None,
+            "ATMOSPHERE-TYPE": ",".join([str(v) for v in self.type]) if self.type is not None else None,
+            "ATMOSPHERE-ABUN": ",".join([str(v.value) for v in self.abun]) if self.abun is not None else None,
+            "ATMOSPHERE-UNIT": ",".join([str(v.unit) for v in self.abun]) if self.abun is not None else None,
             "ATMOSPHERE-NAERO": self.naero,
-            "ATMOSPHERE-AEROS": ",".join([str(v) for v in self.aeros]),
-            "ATMOSPHERE-ATYPE": ",".join([str(v) for v in self.atype]),
-            "ATMOSPHERE-AABUN": ",".join([str(v.value) for v in self.aabun]),
-            "ATMOSPHERE-AUNIT": ",".join([str(v.unit) for v in self.aabun]),
-            "ATMOSPHERE-ASIZE": ",".join([str(v.value) for v in self.asize]),
-            "ATMOSPHERE-ASUNI": ",".join([str(v.unit) for v in self.asize]),
+            "ATMOSPHERE-AEROS": ",".join([str(v) for v in self.aeros]) if self.aeros is not None else None,
+            "ATMOSPHERE-ATYPE": ",".join([str(v) for v in self.atype]) if self.atype is not None else None,
+            "ATMOSPHERE-AABUN": ",".join([str(v.value) for v in self.aabun]) if self.aabun is not None else None,
+            "ATMOSPHERE-AUNIT": ",".join([str(v.unit) for v in self.aabun]) if self.aabun is not None else None,
+            "ATMOSPHERE-ASIZE": ",".join([str(v.value) for v in self.asize]) if self.asize is not None else None,
+            "ATMOSPHERE-ASUNI": ",".join([str(v.unit) for v in self.asize]) if self.asize is not None else None,
             "ATMOSPHERE-LAYERS-MOLECULES": ",".join(
                 [str(v) for v in self.layers_molecules]
-            ),
-            "ATMOSPHERE-LAYERS": self.layers,
+            ) if self.layers_molecules is not None else None,
+            "ATMOSPHERE-LAYERS": self.layers ,
             "ATMOSPHERE-STRUCTURE": self.structure,
             "ATMOSPHERE-PRESSURE": self.pressure,
             "ATMOSPHERE-PUNIT": self.punit,
-            "ATMOSPHERE-TEMPERATURE": self.temperature,
+            "ATMOSPHERE-TEMPERATURE": self.temperature.to_value(u.K) if self.temperature is not None else None,
             "ATMOSPHERE-WEIGHT": self.weight,
             "ATMOSPHERE-CONTINUUM": self.continuum,
             "ATMOSPHERE-TAU": self.tau,
@@ -494,12 +471,13 @@ class PSG_Atmosphere(PSG_Config):
             "ATMOSPHERE-DESCRIPTION": self.description,
             "ATMOSPHERE-GCM-PARAMETERS": self.gcm_parameters,
         }
-        for i in range(1, self.layers + 1):
-            config[f"ATMOSPHERE-LAYER-{i}"] = np.array2string(
-                self.layer[i - 1], separator=",", max_line_width=np.inf
-            )[1:-1]
+        if self.layers is not None:
+            for i in range(1, self.layers + 1):
+                config[f"ATMOSPHERE-LAYER-{i}"] = np.array2string(
+                    self.layer[i - 1], separator=",", max_line_width=np.inf
+                )[1:-1]
 
-        config = {k:str(v) for k,v in config.items()}
+        config = {k: str(v) for k, v in config.items() if v is not None}
         return config
 
     @property
@@ -542,16 +520,323 @@ class PSG_Atmosphere(PSG_Config):
     @property
     def asuni(self):
         #:list(init): Unit of the size of the aerosol particles
+        if self.asize is None:
+            return None
         return [a.unit for a in self.asize]
 
     @property
     def naero(self):
         #:int: Number of aerosols to include in the simulation, maximum 20
+        if self.aeros is None:
+            return None
         return len(self.aeros)
 
     @property
     def layers(self):
         return self.layer.shape[0]
+
+
+class PSG_Surface(PSG_Config):
+    def __init__(self, config) -> None:
+        #:str: Type of scattering model describing the surface, and the model parameters
+        self.model = self.get_value(config, "SURFACE-MODEL")
+        #:quantity: Temperature of the surface [K]
+        self.temperature = self.get_quantity(config, "SURFACE-TEMPERATURE", u.K)
+        #:float: Albedo the surface [0:non-reflectance, 1:fully-reflective]
+        self.albedo = self.get_value(config, "SURFACE-ALBEDO", float)
+        #:float: Emissivity of the surface [0:non-emitting, 1:perfect-emitter]
+        self.emissivity = self.get_value(config, "SURFACE-EMISSIVITY", float)
+        #:float: For expanding cometary coma, this value indicates an scaling value for the dust in the coma
+        self.gas_ratio = self.get_value(config, "SURFACE-GAS-RATIO", float)
+        #:str: Unit of the dust abundance, [ratio] is dust/gas mass ratio, while [afrho] is the Afrho value and [lafrho] is log[Afrho/Q]
+        self.gas_unit = config.get("SURFACE-GAS-UNIT")
+        #:int: Number of components describing the surface properties [areal mixing]
+        self.nsurf = self.get_value(config, "SURFACE-NSURF", int)
+        #:str: Name of surface components to be included in the simulation
+        self.surf = config.get("SURFACE-SURF")
+        #:str: Sub-type of the surface components
+        self.type = config.get("SURFACE-TYPE")
+        #:str: Relative abundance of the surface components. For the remaining abundance, average surface albedo/emissivity will be considered
+        self.abun = config.get("SURFACE-ABUN")
+        #:Unit: Unit of the SURFACE-ABUN field, % / ppm / ppv
+        self.unit = self.get_value(config, "SURFACE-UNIT", u.Unit)
+        #:str: Thickness for each surface component [um]
+        self.thick = self.get_quantity(config, "SURFACE-THICK", u.um)
+
+    def to_config(self):
+        config = {
+            "SURFACE-MODEL": self.model,
+            "SURFACE-TEMPERATURE": self.temperature.to_value(u.K)
+            if self.temperature is not None
+            else None,
+            "SURFACE-ALBEDO": self.albedo,
+            "SURFACE-EMISSIVITY": self.emissivity,
+            "SURFACE-GAS-RATIO": self.gas_ratio,
+            "SURFACE-GAS-UNIT": self.gas_unit,
+            "SURFACE-NSURF": self.nsurf,
+            "SURFACE-SURF": self.surf,
+            "SURFACE-TYPE": self.type,
+            "SURFACE-ABUN": self.abun,
+            "SURFACE-UNIT": self.unit,
+            "SURFACE-THICK": self.thick.to_value(u.um)
+            if self.thick is not None
+            else None,
+        }
+        config = {k: str(v) for k, v in config.items() if v is not None}
+        return config
+
+
+class PSG_Generator(PSG_Config):
+    def __init__(self, config) -> None:
+        # Unit of the GENERATOR-RANGE fields, um / nm / mm / An:'Angstrom' / cm:'Wavenumber [cm-1]' / MHz / GHz / kHz
+        range_unit = config.get("GENERATOR-RANGEUNIT")
+        range_unit = self.parse_units(range_unit, [u.um, u.nm, u.mm, u.AA, 1 / u.cm, u.MHz, u.GHz, u.kHz],
+            ["um", "nm", "An", "cm", "MHz", "GHz", "kHz"],)
+        #:quantity: Lower spectral range for the simulation
+        self.range1 = self.get_quantity(config, "GENERATOR-RANGE1", range_unit)
+        #:quantity: Upper spectral range for the simulation
+        self.range2 = self.get_quantity(config, "GENERATOR-RANGE2", range_unit)
+
+        resolution_unit = config.get("GENERATOR-RESOLUTIONUNIT")
+        resolution_unit = self.parse_units(resolution_unit, [u.one, u.um, u.nm, u.mm, u.AA, 1/u.cm, u.MHz, u.GHz, u.kHz], ["RP", "um", "nm", "mm", "An", "cm", "MHz", "GHz", "kHz"])
+        #:quantity: Spectral resolution for the simulation. PSG assumes that the sampling resolution is equal is to the instrumental resolution, yet radiative transfer resolutions are always performed at the necessary/higher resolutions in order to accurately describe the lineshapes
+        self.resolution = self.get_quantity(config, "GENERATOR-RESOLUTION", resolution_unit)
+        #:bool: Convolution kernel applied to the spectra, default is 'N'
+        self.resolution_kernel = self.get_bool(config, "GENERATOR-RESOLUTIONKERNEL")
+        #:bool: Flag indicating whether to include molecular signatures as generated with PUMAS or CEM [Y/N]
+        self.gas_model = self.get_bool(config, "GENERATOR-GAS-MODEL")
+        #:bool: Flag indicating whether to include continuum signatures as generated by the surface, the star (when in the field) and dust/nucleus (when synthesizing comets) [Y/N]
+        self.cont_model = self.get_bool(config, "GENERATOR-CONT-MODEL")
+        #:bool: Flag indicating whether to include stellar absorption signatures in the reflected sunlight / stellar spectra [Y/N]
+        self.cont_stellar = self.get_bool(config, "GENERATOR-CONT-STELLAR")
+        #:bool: Flag indicating whether we are synthesizing planetary spectra as observed with a ground-based telescope. This flag will ensure that the noise module properly includes telluric signatures
+        self.trans_show = self.get_bool(config, "GENERATOR-TRANS-SHOW")
+        #:bool: Flag indicating whether to show the spectra as observed and multiplied by the telluric transmittance [Y]
+        self.trans_apply = self.get_bool(config, "GENERATOR-TRANS-APPLY")
+        #:str: Keyword [SS-WW] indicating the site [SS] and water abundance [WW]. Values of SS are 00:'0m (sea level)', 01:'2,600m (8,500 feet)', 02:'4,200m (14,000 feet)', 03:'14,000m (46,000 feet)', 04:'35,000m (120,000 feet)'. Values of WW are 00:'10% tropical', 01:'30% tropical', 02:'70% tropical', 03:'100% tropical'
+        self.trans = config.get("GENERATOR-TRANS")
+        #:str: Radiation unit for the generated spectra, see full list of permitted keywords in the 'Modeling > Radiation Units' section
+        self.rad_units = config.get("GENERATOR-RADUNITS")
+        #:bool: Flag indicating whether to show the spectra employing a logarithmic scale
+        self.lograd = self.get_bool(config, "GENERATOR-LOGRAD")
+        #:str: Type of telescope, SINGLE:'single dish telescope or instrument', ARRAY:'Interferometric array', CORONA:'Coronagraph', AOTF or LIDAR
+        self.telescope = config.get("GENERATOR-TELESCOPE")
+
+        beam_unit = self.get_value(config, "GENERATOR-BEAM-UNIT", u.Unit)
+        #:quantity: Full width half-maximum (FWHM) of the instrument's beam or field-of-view (FOV)
+        self.beam = self.get_quantity(config, "GENERATOR-BEAM", beam_unit)
+        #:quantity: Diameter of the main reflecting surface of the telescope or instrument [m]
+        self.diam_tele = self.get_quantity(config, "GENERATOR-DIAMTELE", u.m)
+        #:str: For interferometers, the number of telescopes; for coronagraphs, the instrument's contrast
+        self.telescope1 = config.get("GENERATOR-TELESCOPE1")
+        #:str: This field indicates the zodi-level (1.0:Ecliptic pole/minimum, 2.0:HST/JWST low values, 10.0:Normal values, 100.0:Close to ecliptic/Sun), or order number for the AOTF system. For coronagraphs, this field indicates allows two entries: the exozodi level and the local zodiacal dust level
+        self.telescope2 = config.get("GENERATOR-TELESCOPE2")
+        #:str: For coronagraphic observations, the inner working angle (IWA) in units of [L/D]
+        self.telescope3 = config.get("GENERATOR-TELESCOPE3")
+        #:str: Keyword identifying the noise model to consider, NO:'None', TRX:'Receiver temperature', RMS:'Constant noise in radiation units', BKG:'Constant noise with added background', NEP:'Power equivalent noise detector model', D*:'Detectability noise detector model', CCD:'Image sensor'
+        self.noise = config.get("GENERATOR-NOISE")
+        #:quantity: Exposure time per frame [sec]
+        self.noise_time = self.get_quantity(config, "GENERATOR-NOISETIME", u.s)
+        #:int: Number of exposures
+        self.noise_frames = self.get_value(config, "GENERATOR-NOISEFRAMES", int)
+        #:int: Total number of pixels that encompass the beam (GENERATOR-BEAM) and the spectral unit (GENERATOR-RESOLUTION)
+        self.noise_pixels = self.get_value(config, "GENERATOR-NOISEPIXELS", int)
+        #:str: First noise model parameter - For RMS, 1-sigma noise; for TRX, the receiver temperature; for BKG, the 1-sigma noise; for NEP, the sensitivity in W/sqrt(Hz); for DET, the sensitivity in cm.sqrt(Hz)/W; for CCD, the read noise [e-]
+        self.noise1 = config.get("GENERATOR-NOISE1")
+        #:str: Second noise model parameter - For RMS, not used; for TRX, the sideband g-factor; for BKG, the not used; for NEP, not used; for DET, the pixel size [um]; for CCD, the dark rate [e-/s]
+        self.noise2 = config.get("GENERATOR-NOISE2")
+        #:float: Total throughput of the telescope+instrument, from photons arriving to the main mirror to photons being quantified by the detector [0:none to 1:perfect]. The user can provide wavelength dependent values as neff@wavelength[um] (e.g., '0.087@2.28,0.089@2.30,0.092@2.31,0.094@2.32,...')
+        self.noise_oeff = config.get("GENERATOR-NOISEOEFF")
+        #:float: Emissivity of the telescope+instrument optics [0 to 1]
+        self.noise_oemis = self.get_value(config, "GENERATOR-NOISEOEMIS", float)
+        #:float: Temperature of the telescope+instrument optics [K]
+        self.noise_otemp = self.get_quantity(config, "GENERATOR-NOISEOTEMP", u.K)
+        #:str: Text describing if an instrument template was used to define the GENERATOR parameters
+        self.instrument = config.get("GENERATOR-INSTRUMENT")
+        #:float: Well depth [e-] of each pixel detector
+        self.noise_well = self.get_value(config, "GENERATOR-NOISEWELL", float)
+        #:float: Spatial binning applied to the GCM data when computing spectra. 1: Full resolution
+        self.gcm_binning = self.get_value(config, "GENERATOR-GCM-BINNING", float)
+
+    @property
+    def range_unit(self):
+        return self.range1.unit
+
+    @property
+    def resolution_unit(self):
+        return self.resolution.unit
+
+    @property
+    def beam_unit(self):
+        return self.beam.unit
+
+    def to_config(self):
+        range_unit_loc, range_unit = self.get_units(
+            self.range_unit,
+            [u.um, u.nm, u.mm, u.AA, 1 / u.cm, u.MHz, u.GHz, u.kHz],
+            ["um", "nm", "An", "cm", "MHz", "GHz", "kHz"],
+        )
+        resolution_unit_loc, resolution_unit = self.get_units(
+            self.resolution_unit,
+            [u.one, u.um, u.nm, u.mm, u.AA, 1 / u.cm, u.MHz, u.GHz, u.kHz],
+            ["RP", "um", "nm", "mm", "An", "cm", "MHz", "GHz", "kHz"],
+        )
+        beam_unit_loc, beam_unit = self.get_units(
+            self.beam_unit,
+            [u.arcsec, u.arcmin, u.deg, u.km, diameter, diffrac],
+            ["arcsec", "arcmin", "degree", "km", "diameter", "diffrac"],
+        )
+        config = {
+            "GENERATOR-RANGE1": self.range1.to_value(range_unit_loc) if self.range1 is not None and range_unit_loc is not None else None,
+            "GENERATOR-RANGE2": self.range2.to_value(range_unit_loc) if self.range2 is not None and range_unit_loc is not None else None,
+            "GENERATOR-RANGEUNIT": range_unit,
+            "GENERATOR-RESOLUTION": self.resolution.to_value(resolution_unit_loc) if self.resolution is not None and resolution_unit_loc is not None else None,
+            "GENERATOR-RESOLUTIONUNIT": resolution_unit,
+            "GENERATOR-RESOLUTIONKERNEL": "Y" if self.resolution_kernel else "N" if self.resolution_kernel is not None else None,
+            "GENERATOR-GAS-MODEL": "Y" if self.gas_model else "N" if self.gas_model is not None else None,
+            "GENERATOR-CONT-MODEL": "Y" if self.cont_model else "N" if self.cont_model is not None else None,
+            "GENERATOR-CONT-STELLAR": "Y" if self.cont_stellar else "N" if self.cont_stellar is not None else None,
+            "GENERATOR-TRANS-SHOW": "Y" if self.trans_show else "N" if self.trans_show is not None else None,
+            "GENERATOR-TRANS-APPLY": "Y" if self.trans_apply else "N" if self.trans_apply is not None else None,
+            "GENERATOR-TRANS": self.trans,
+            "GENERATOR-RADUNITS": self.rad_units,
+            "GENERATOR-LOGRAD": "Y" if self.lograd else "N" if self.lograd is not None else None,
+            "GENERATOR-TELESCOPE": self.telescope,
+            "GENERATOR-BEAM": self.beam.to_value(beam_unit_loc) if self.beam is not None and beam_unit_loc is not None else None,
+            "GENERATOR-BEAM-UNIT": beam_unit,
+            "GENERATOR-DIAMTELE": self.diam_tele.to_value(u.m) if self.diam_tele is not None else None,
+            "GENERATOR-TELESCOPE1": self.telescope1,
+            "GENERATOR-TELESCOPE2": self.telescope2,
+            "GENERATOR-TELESCOPE3": self.telescope3,
+            "GENERATOR-NOISE": self.noise,
+            "GENERATOR-NOISETIME": self.noise_time.to_value(u.s) if self.noise_time is not None else None,
+            "GENERATOR-NOISEFRAMES": self.noise_frames,
+            "GENERATOR-NOISEPIXELS": self.noise_pixels,
+            "GENERATOR-NOISE1": self.noise1,
+            "GENERATOR-NOISE2": self.noise2,
+            "GENERATOR-NOISEOEFF": self.noise_oeff,
+            "GENERATOR-NOISEOEMIS": self.noise_oemis,
+            "GENERATOR-NOISEOTEMP": self.noise_otemp.to_value(u.K) if self.noise_otemp is not None else None,
+            "GENERATOR-INSTRUMENT": self.instrument,
+            "GENERATOR-NOISEWELL": self.noise_well,
+            "GENERATOR-GCM-BINNING": self.gcm_binning,
+        }
+        config = {k: str(v) for k, v in config.items() if v is not None}
+        return config
+
+
+class PSG_Retrieval(PSG_Config):
+    def __init__(self, config) -> None:
+        #:float: The parameter Gamma (or Levenberg-Marquart parameter) is the extra regularization parameter (e.g., 0:Classic LM, 1:classic Rodgers' formalism, 10:Heavily tailored to the a-priori)
+        self.gamma = self.get_value(config, "RETRIEVAL-GAMMA", float)
+        #:str: Parameters for the nested sampling retrieval method
+        self.nest = config.get("RETRIEVAL-NEST")
+
+        range_unit = config.get("RETRIEVAL-RANGEUNIT")
+        #:Unit: Spectral unit of the user-provided data for the retrieval, um / nm / mm / An:'Angstrom' / cm:'Wavenumber [cm-1]' / MHz / GHz / kHz
+        self.range_unit = self.parse_units(
+            range_unit,
+            [u.um, u.nm, u.mm, u.AA, 1 / u.cm, u.MHz, u.GHz, u.kHz],
+            ["um", "nm", "mm", "An", "cm", "MHz", "GHz", "kHz"],
+        )
+
+        resolution_unit = config.get("RETRIEVAL-RESOLUTIONUNIT")
+        resolution_unit = self.parse_units(
+            resolution_unit,
+            [u.one, u.um, u.nm, u.mm, u.AA, 1 / u.cm, u.MHz, u.GHz, u.kHz],
+            ["RP", "um", "nm", "mm", "An", "cm", "MHz", "GHz", "kHz"],
+        )
+        #:quantity: Instrument's spectral resolution [FWHM] of the user-provided data. This value is independent of the sampling rate of the data, and refers to the actual spectral resolution of the instrument
+        self.resolution = self.get_quantity(config, "RETRIEVAL-RESOLUTION", resolution_unit)
+        #:float: Scaling value to be applied to all fluxes of the user-provided data file
+        self.flux_scaler = self.get_value(config, "RETRIEVAL-FLUXSCALER", float)
+        #:str: Frequency/wavelength corrections (0th, 1st and 2nd orders) to be applied to the data
+        self.freq_shift = config.get("RETRIEVAL-FREQSHIFT")
+        #:str: Labels for the columns of the data file
+        self.flux_labels = config.get("RETRIEVAL-FLUXLABELS")
+        #:int: Polynomical degree of the instrument's gain function, -1:None, 0:Constant, 1:Sloped, 2:Quadratic, etc
+        self.fit_gain = self.get_value(config, "RETRIEVAL-FITGAIN", int)
+        #:bool: Flag indicating whether to preserve the photometric information of the data (zeroth order of gain fitting) [Y:Disable 0th order / N:Enable]
+        self.fit_gain_photometric = self.get_bool(config, "RETRIEVAL-FITGAIN-PHOTOMETRIC")
+        #:int: Polynomical degree of the residual offset, -1:None, 0:Constant, 1:Sloped, 2:Quadratic, etc
+        self.remove_offset = self.get_value(config, "RETRIEVAL-REMOVEOFFSET", int)
+        #:int: Maximum number of spectral fringes to be removed from the data
+        self.remove_fringe = self.get_value(config, "RETRIEVAL-REMOVEFRINGE", int)
+        #:bool: Flag indicating whether to fit the intensity of the solar/stellar features [Y/N]
+        self.fit_stellar = self.get_bool(config, "RETRIEVAL-FITSTELLAR")
+        #:bool: Flag indicating whether to refine the spectral calibration [Y/N]
+        self.fit_freq = self.get_bool(config, "RETRIEVAL-FITFREQ")
+        #:bool: Flag indicating whether to fit the spectral resolution [Y/N]
+        self.fit_resolution = self.get_bool(config, "RETRIEVAL-FITRESOLUTION")
+        #:bool: Flag indicating whether to fit the telluric features [Y/N]. This is done by perturbing the selected telluric column/water abundances
+        self.fit_telluric = self.get_bool(config, "RETRIEVAL-FITTELLURIC")
+        #:list: Name of the variables of the retrieval (comma separated)
+        self.variables = self.get_list(config, "RETRIEVAL-VARIABLES")
+        #:array: A-priori and resulting values of the retrieval parameters (comma separated)
+        self.values = self.get_list(config, "RETRIEVAL-VALUES", func=float, array=True)
+        #:array: Resulting 1-sigma uncertainties (corrected by chi-square) of the retrieval parameters (comma separated)
+        self.sigmas = self.get_list(config, "RETRIEVAL-SIGMAS", func=float, array=True)
+        #:array: Lower boundary permitted for each parameter (comma separated)
+        self.min = self.get_list(config, "RETRIEVAL-MIN", func=float, array=True)
+        #:array: Upper boundary permitted for each parameter (comma separated)
+        self.max = self.get_list(config, "RETRIEVAL-MAX", func=float, array=True)
+        #:list: Magnitude unit of the a-priori and boundary entries (comma separated)
+        self.units = self.get_list(config, "RETRIEVAL-UNITS")
+        #:str: Flag indicating the status of the retrieval suite (e.g., RUNNING, OK)
+        self.status = self.get_bool(config, "RETRIEVAL-STATUS")
+
+    @property
+    def resolution_unit(self):
+        if self.resolution is None:
+            return None
+        return self.resolution.unit
+
+    @property
+    def nvars(self):
+        if self.variables is None:
+            return None
+        return len(self.variables)
+
+    def to_config(self):
+        range_unit_loc, range_unit = self.get_units(
+            self.range_unit,
+            [u.um, u.nm, u.mm, u.AA, 1 / u.cm, u.MHz, u.GHz, u.kHz],
+            ["um", "nm", "mm", "An", "cm", "MHz", "GHz", "kHz"],
+        )
+        resolution_unit_loc, resolution_unit = self.get_units(
+            self.resolution_unit,
+            [u.one, u.um, u.nm, u.mm, u.AA, 1 / u.cm, u.MHz, u.GHz, u.kHz],
+            ["RP", "um", "nm", "mm", "An", "cm", "MHz", "GHz", "kHz"],
+        )
+
+        config = {
+            "RETRIEVAL-GAMMA": self.gamma,
+            "RETRIEVAL-NEST": self.nest,
+            "RETRIEVAL-RANGEUNIT": self.range_unit,
+            "RETRIEVAL-RESOLUTION": self.resolution.to_value(resolution_unit_loc) if self.resolution is not None and resolution_unit_loc is not None else None,
+            "RETRIEVAL-RESOLUTIONUNIT": resolution_unit,
+            "RETRIEVAL-FLUXSCALER": self.flux_scaler,
+            "RETRIEVAL-FREQSHIFT": self.freq_shift,
+            "RETRIEVAL-FLUXLABELS": self.flux_labels,
+            "RETRIEVAL-FITGAIN": self.fit_gain,
+            "RETRIEVAL-FITGAIN-PHOTOMETRIC": "Y" if self.fit_gain_photometric else "N" if self.fit_gain_photometric is not None else None,
+            "RETRIEVAL-REMOVEOFFSET": self.remove_offset,
+            "RETRIEVAL-REMOVEFRINGE": self.remove_fringe,
+            "RETRIEVAL-FITSTELLAR": "Y" if self.fit_stellar else "N" if self.fit_stellar is not None else None,
+            "RETRIEVAL-FITFREQ": "Y" if self.fit_freq else "N" if self.fit_freq is not None else None,
+            "RETRIEVAL-FITRESOLUTION": "Y" if self.fit_resolution else "N" if self.fit_resolution is not None else None,
+            "RETRIEVAL-FITTELLURIC": "Y" if self.fit_telluric else "N" if self.fit_telluric is not None else None,
+            "RETRIEVAL-NVARS": self.nvars,
+            "RETRIEVAL-VARIABLES": ",".join(self.variables) if self.variables is not None else None,
+            "RETRIEVAL-VALUES": ",".join([str(v) for v in self.values]) if self.values is not None else None,
+            "RETRIEVAL-SIGMAS": ",".join([str(v) for v in self.sigmas]) if self.sigmas is not None else None,
+            "RETRIEVAL-MIN": ",".join([str(v) for v in self.min]) if self.min is not None else None,
+            "RETRIEVAL-MAX": ",".join([str(v) for v in self.max]) if self.max is not None else None,
+            "RETRIEVAL-UNITS": ",".join(self.units) if self.units is not None else None,
+            "RETRIEVAL-STATUS": self.status,
+        }
+        config = {k: str(v) for k, v in config.items() if v is not None}
+        return config
 
 
 class PSG_Package:
@@ -776,6 +1061,9 @@ class PSG:
         self.object = PSG_Object(self._config)
         self.geometry = PSG_Geometry(self._config)
         self.atmosphere = PSG_Atmosphere(self._config)
+        self.surface = PSG_Surface(self._config)
+        self.generator = PSG_Generator(self._config)
+        self.retrieval = PSG_Retrieval(self._config)
 
         # Load the individual packages for object oriented interface
         versions = self.get_package_version()
@@ -801,6 +1089,9 @@ class PSG:
         self._config.update(self.object.to_config())
         self._config.update(self.geometry.to_config())
         self._config.update(self.atmosphere.to_config())
+        self._config.update(self.surface.to_config())
+        self._config.update(self.generator.to_config())
+        self._config.update(self.retrieval.to_config())
         return self._config
 
     def write_config(self, config_file=None):
