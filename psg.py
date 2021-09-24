@@ -7,6 +7,7 @@
 from io import StringIO
 from os.path import dirname, join
 import subprocess
+from datetime import datetime
 
 import re
 import hashlib
@@ -19,23 +20,23 @@ from astropy.utils.data import (
     clear_download_cache,
     is_url_in_cache,
 )
-from astropy import units
+from astropy import units as u
 
 # Add Atmosphere scale units
-ppb = units.def_unit(
-    ["ppb", "ppbv"], 1e-9 * units.one, namespace=globals(), doc="Parts Per Billion"
+ppb = u.def_unit(
+    ["ppb", "ppbv"], 1e-9 * u.one, namespace=globals(), doc="Parts Per Billion"
 )
-ppm = units.def_unit(
+ppm = u.def_unit(
     ["ppm", "ppmv"], 1e3 * ppb, namespace=globals(), doc="Parts Per Million Volume"
 )
-ppt = units.def_unit(
+ppt = u.def_unit(
     ["ppt", "pptv"], 1e6 * ppb, namespace=globals(), doc="Parts Per Thousand Volume"
 )
-m2 = units.def_unit(
+m2 = u.def_unit(
     ["m2", "m-2"], None, namespace=globals(), doc="Molecules per square meter"
 )
-scl = units.def_unit(["scl"], None, namespace=globals(), doc="Relative Scale")
-units.add_enabled_units([ppb, ppm, ppt, m2, scl])
+scl = u.def_unit(["scl"], None, namespace=globals(), doc="Relative Scale")
+u.add_enabled_units([ppb, ppm, ppt, m2, scl])
 
 # Package Name for the Astropy cache
 PKGNAME = "planet-spectrum-generator"
@@ -51,6 +52,263 @@ class PSG_Config:
     def to_config(self):
         return self.other
 
+class PSG_Object(PSG_Config):
+    def __init__(self, config) -> None:
+        #:str: Object type (e.g., Exoplanet, Planet, Asteroid, Moon, Comet, Object)
+        self.object = config["OBJECT"]
+        #:str: Object name
+        self.name = config["OBJECT-NAME"]
+        # Datetime
+        match = re.match(r"(\d{4})/(\d{2})/(\d{2}) (\d{2}):(\d{2})", config["OBJECT-DATE"])
+        #:datetime: Date of the observation (yyyy/mm/dd hh:mm) in Universal time [UT]
+        self.date = datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4)), int(match.group(5)))
+        #:Quantity: Diameter of the object [km]
+        self.diameter = float(config["OBJECT-DIAMETER"]) * u.km
+        # Gravity
+        gravity_unit = config["OBJECT-GRAVITY-UNIT"]
+        if gravity_unit == "g": # Surface Gravity
+            gravity_unit = u.m/u.s**2
+        elif gravity_unit == "rho": # Mean Density
+            gravity_unit = u.g/u.cm**3
+        elif gravity_unit == "kg": # Total Mass
+            gravity_unit = u.kg
+        #:Quantity: Gravity/density/mass of the object
+        self.gravity = float(config["OBJECT-GRAVITY"]) * gravity_unit
+        #:Quantity: Distance of the planet to the Sun [AU], and for exoplanets the semi-major axis [AU]
+        self.star_distance = float(config["OBJECT-STAR-DISTANCE"]) * u.AU
+        #:Quantity: Velocity of the planet to the Sun [km/s], and for exoplanets the RV amplitude [km/s]
+        self.star_velocity = float(config["OBJECT-STAR-VELOCITY"]) * (u.km / u.s)
+        #:Quantity: Sub-solar east longitude [degrees]
+        self.solar_longitude = float(config["OBJECT-SOLAR-LONGITUDE"]) * u.deg
+        #:Quantity: Sub-solar latitude [degrees]
+        self.solar_latitude = float(config["OBJECT-SOLAR-LATITUDE"]) * u.deg
+        #:Quantity: Angular parameter (season/phase) that defines the position of the planet moving along its Keplerian orbit. For exoplanets, 0:Secondary transit, 180:Primary transit, 90/270:Opposition. For solar-system bodies, 0:'N spring equinox', 90:'N summer solstice', 180:'N autumn equinox', 270:'N winter solstice' [degrees]
+        self.season = float(config["OBJECT-SEASON"]) * u.deg
+        #:Quantity: Orbital inclination [degree], mainly relevant for exoplanets. Zero is phase on, 90 is a transiting orbit
+        self.inclination = float(config["OBJECT-INCLINATION"]) * u.deg
+        #:float: Orbital eccentricity, mainly relevant for exoplanets
+        self.eccentricity = float(config["OBJECT-ECCENTRICITY"])
+        #:Quantity: Orbital longitude of periapse [degrees]. It indicates the phase at which the planet reaches periapsis
+        self.periapsis = float(config["OBJECT-PERIAPSIS"]) * u.deg
+        #:str: Stellar type of the parent star [O/B/A/F/G/K/M]
+        self.star_type = config["OBJECT-STAR-TYPE"]
+        #:Quantity:  Temperature of the parent star [K]
+        self.star_temperature = float(config["OBJECT-STAR-TEMPERATURE"]) * u.K
+        #:Quantity: Radius of the parent star [Rsun]
+        self.star_radius = float(config["OBJECT-STAR-RADIUS"]) * u.Rsun
+        #:float: Metallicity of the parent star and object with respect to the Sun in log [dex]
+        self.star_metallicity = float(config["OBJECT-STAR-METALLICITY"])
+        #:Quantity: Sub-observer east longitude [degrees]
+        self.obs_longitude = float(config["OBJECT-OBS-LONGITUDE"]) * u.deg
+        #:Quantity: Sub-observer latitude, for exoplanets inclination [degrees]
+        self.obs_latitude = float(config["OBJECT-OBS-LATITUDE"]) * u.deg
+        #:Quantity: Relative velocity between the observer and the object [km/s]
+        self.obs_velocity = float(config["OBJECT-OBS-VELOCITY"]) * (u.km/u.s)
+        #:Quantity: This field is computed by the geometry module - It is the apparent rotational period of the object as seen from the observer [days]
+        self.period = float(config["OBJECT-PERIOD"]) * u.day
+        #:str: This field reports the orbital parameters for small bodies. It is only relevant for display purposes of the orbital diagram.
+        self.orbit = config.get("OBJECT-ORBIT", "")
+
+    @property
+    def gravity_unit(self):
+        """ Unit for the OBJECT-GRAVITY field, g:'Surface gravity [m/s2]', rho:'Mean density [g/cm3]', or kg:'Total mass [kg]' """
+        return self.gravity.unit
+
+    def to_config(self):
+        try:
+            gravity = self.gravity.to_value(u.m/u.s**2)
+            gravity_unit = "g"
+        except u.core.UnitConversionError:
+            try:
+                gravity = self.gravity.to_value(u.g/u.cm**3)
+                gravity_unit = "rho"
+            except u.core.UnitConversionError:
+                try:
+                    gravity = self.gravity.to_value(u.kg)
+                    gravity_unit = "kg"
+                except u.core.UnitConversionError:
+                    raise ValueError("Can not convert the gravity units to PSG units")
+
+        config = {
+            "OBJECT" : self.object,
+            "OBJECT-NAME": self.name,
+            "OBJECT-DATE": f"{self.date.year:04}/{self.date.month:02}/{self.date.day:02} {self.date.hour:02}:{self.date.minute:02}",
+            "OBJECT-DIAMETER": self.diameter.to_value(u.km),
+            "OBJECT-GRAVITY": gravity,
+            "OBJECT-GRAVITY-UNIT": gravity_unit,
+            "OBJECT-STAR-DISTANCE": self.star_distance.to_value(u.AU),
+            "OBJECT-STAR-VELOCITY": self.star_velocity.to_value(u.km/u.s),
+            "OBJECT-SOLAR-LONGITUDE": self.solar_longitude.to_value(u.deg),
+            "OBJECT-SOLAR-LATITUDE": self.solar_latitude.to_value(u.deg),
+            "OBJECT-SEASON": self.season.to_value(u.deg),
+            "OBJECT-INCLINATION": self.inclination.to_value(u.deg),
+            "OBJECT-ECCENTRICITY": self.eccentricity,
+            "OBJECT-PERIAPSIS": self.periapsis.to_value(u.deg),
+            "OBJECT-STAR-TYPE": self.star_type,
+            "OBJECT-STAR-TEMPERATURE": self.star_temperature.to_value(u.K),
+            "OBJECT-STAR-RADIUS": self.star_radius.to_value(u.Rsun),
+            "OBJECT-STAR-METALLICITY": self.star_metallicity,
+            "OBJECT-OBS-LONGITUDE": self.obs_longitude.to_value(u.deg),
+            "OBJECT-OBS-LATITUDE": self.obs_latitude.to_value(u.deg),
+            "OBJECT-OBS-VELOCITY": self.obs_velocity.to_value(u.km/u.s),
+            "OBJECT-PERIOD": self.period.to_value(u.day),
+            "OBJECT-ORBIT": self.orbit
+        }
+        config = {k:str(v) for k, v in config.items()}
+        return config
+
+class PSG_Geometry(PSG_Config):
+    def __init__(self, config) -> None:
+        #:str: Type of observing geometry
+        self.geometry = config["GEOMETRY"]
+        #:str: Reference geometry (e.g., ExoMars, Maunakea), default is user defined or 'User'
+        self.ref = config["GEOMETRY-REF"]
+
+        offset_unit = config["GEOMETRY-OFFSET-UNIT"]
+        if offset_unit == "arcsec": 
+            offset_unit = u.arcsec
+        elif offset_unit == "arcmin":
+            offset_unit = u.arcmin
+        elif offset_unit == "degree":
+            offset_unit = u.deg
+        elif offset_unit == "km":
+            offset_unit = u.km
+        elif offset_unit == "diameter":
+            offset_unit = u.one
+        else:
+            raise ValueError("GEOMETRY-OFFSET-UNIT not recognized")
+        #:quantity: Vertical offset with respect to the sub-observer location
+        self.offset_ns = float(config["GEOMETRY-OFFSET-NS"]) * offset_unit
+        #:quantity: Horizontal offset with respect to the sub-observer location
+        self.offset_ew = float(config["GEOMETRY-OFFSET-EW"]) * offset_unit
+        
+        altitude_unit = config["GEOMETRY-ALTITUDE-UNIT"]
+        if altitude_unit == "AU": 
+            altitude_unit = u.AU
+        elif altitude_unit == "km":
+            altitude_unit = u.km
+        elif altitude_unit == "diameter":
+            altitude_unit = u.one
+        elif altitude_unit == "pc":
+            altitude_unit = u.pc
+        else:
+            raise ValueError("GEOMETRY-ALTITUDE-UNIT not recognized")
+        #:quantity: Distance between the observer and the surface of the planet
+        self.obs_altitude = float(config["GEOMETRY-OBS-ALTITUDE"]) * altitude_unit
+        #:quantity: The azimuth angle between the observational projected vector and the solar vector on the reference plane
+        self.azimuth = float(config["GEOMETRY-AZIMUTH"]) * u.deg
+        #:float: Parameter for the selected geometry, for Nadir / Lookingup this field indicates the zenith angle [degrees], for limb / occultations this field indicates the atmospheric height [km] being sampled
+        self.user_param = float(config["GEOMETRY-USER-PARAM"])
+        #:str: For stellar occultations, this field indicates the type of the occultation star [O/B/A/F/G/K/M]
+        self.stellar_type = config["GEOMETRY-STELLAR-TYPE"]
+        #:quantity: For stellar occultations, this field indicates the temperature [K] of the occultation star
+        self.stellar_temperature = float(config["GEOMETRY-STELLAR-TEMPERATURE"]) * u.K
+        #:quantity: For stellar occultations, this field indicates the brightness [magnitude] of the occultation star
+        self.stellar_magnitude = float(config["GEOMETRY-STELLAR-MAGNITUDE"]) * u.mag
+        #:str: This field is computed by the geometry module - It indicates the angle between the observer and the planetary surface
+        self.obs_angle = config["GEOMETRY-OBS-ANGLE"]
+        #:str: This field is computed by the geometry module - It indicates the angle between the Sun and the planetary surface
+        self.solar_angle = config["GEOMETRY-SOLAR-ANGLE"]
+        #:int: This field allows to divide the observable disk in finite rings so radiative-transfer calculations are performed with higher accuracy
+        self.disk_angles = int(config["GEOMETRY-DISK-ANGLES"])
+        #:quantity: This field is computed by the geometry module - It indicates the phase between the Sun and observer
+        self.phase = float(config["GEOMETRY-PHASE"]) * u.deg
+        #:str: This field is computed by the geometry module - It indicates how much the beam fills the planetary area (1:maximum)
+        self.planet_fraction = config["GEOMETRY-PLANET-FRACTION"]
+        #:float: This field is computed by the geometry module - It indicates how much the beam fills the parent star (1:maximum)
+        self.star_fraction = float(config["GEOMETRY-STAR-FRACTION"])
+        #:float: This field is computed by the geometry module - It indicates the projected distance between the beam and the parent star in arcsceconds
+        self.star_distance = float(config["GEOMETRY-STAR-DISTANCE"])
+        #:str: This field is computed by the geometry module - It indicates the rotational Doppler shift [km/s] affecting the spectra and the spread of rotational velocities [km/s] within the FOV
+        self.rotation = config["GEOMETRY-ROTATION"]
+        #:str: This field is computed by the geometry module - It indicates the scaling factor between the integrated reflectance for the FOV with respect to the BRDF as computed using the geometry indidence/emission angles
+        self.brdfscaler = config["GEOMETRY-BRDFSCALER"]
+
+    @property
+    def offset_unit(self):
+        """ Unit of the GEOMETRY-OFFSET field, arcsec / arcmin / degree / km / diameter """
+        return self.offset_ns.unit
+
+    @property
+    def altitude_unit(self):
+        """ Unit of the GEOMETRY-OBS-ALTITUDE field, AU / km / diameter and pc:'parsec' """
+        return self.obs_altitude.unit
+
+    def to_config(self):
+        if self.offset_unit == u.arcsec:
+            offset_unit = "arcsec"
+            loc_offset_unit = u.arcsec
+        elif self.offset_unit == u.arcmin:
+            offset_unit = "arcmin"
+            loc_offset_unit = u.arcmin
+        elif self.offset_unit == u.deg:
+            offset_unit = "degree"
+            loc_offset_unit = u.deg
+        else:
+            try:
+                self.offset_unit.to(u.arcsec)
+                offset_unit = "arcsec"
+                loc_offset_unit = u.arcsec
+            except u.core.UnitConversionError:
+                try:
+                    self.offset_unit.to(u.km)
+                    offset_unit = "km"
+                    loc_offset_unit = u.km
+                except u.core.UnitConversionError:
+                    try:
+                        self.offset_unit.to(u.one)
+                        offset_unit = "diameter"
+                        loc_offset_unit = u.one
+                    except u.core.UnitConversionError:
+                        raise ValueError("Could not determine the offset unit")
+
+        if self.altitude_unit == u.AU:
+            altitude_unit = "AU"
+            loc_altitude_unit = u.AU
+        elif self.altitude_unit == u.km:
+            altitude_unit = "km"
+            loc_altitude_unit = u.km
+        elif self.altitude_unit == u.pc:
+            altitude_unit = "pc"
+            loc_altitude_unit = u.pc
+        else:
+            try:
+                self.altitude_unit.to(u.km)
+                altitude_unit = "km"
+                loc_altitude_unit = u.km
+            except u.core.UnitConversionError:
+                try:
+                    self.altitude_unit.to(u.one)
+                    altitude_unit = "diameter"
+                    loc_altitude_unit = u.one
+                except u.core.UnitConversionError:
+                    raise ValueError("Could not recognize altitude units")
+
+        config = {
+            "GEOMETRY": self.geometry,
+            "GEOMETRY-REF": self.ref,
+            "GEOMETRY-OFFSET-NS" : self.offset_ns.to_value(loc_offset_unit),
+            "GEOMETRY-OFFSET-EW" : self.offset_ew.to_value(loc_offset_unit),
+            "GEOMETRY-OFFSET-UNIT": offset_unit,
+            "GEOMETRY-OBS-ALTITUDE": self.obs_altitude.to_value(loc_altitude_unit),
+            "GEOMETRY-ALTITUDE-UNIT": altitude_unit,
+            "GEOMETRY-AZIMUTH": self.azimuth.to_value(u.deg),
+            "GEOMETRY-USER-PARAM": self.user_param,
+            "GEOMETRY-STELLAR-TYPE": self.stellar_type,
+            "GEOMETRY-STELLAR-TEMPERATURE": self.stellar_temperature.to_value(u.K),
+            "GEOMETRY-STELLAR-MAGNITUDE": self.stellar_magnitude.to_value(u.mag),
+            "GEOMETRY-OBS-ANGLE": self.obs_angle,
+            "GEOMETRY-SOLAR-ANGLE": self.solar_angle,
+            "GEOMETRY-DISK-ANGLES": self.disk_angles,
+            "GEOMETRY-PHASE": self.phase.to_value(u.deg),
+            "GEOMETRY-PLANET-FRACTION": self.planet_fraction,
+            "GEOMETRY-STAR-FRACTION": self.star_fraction,
+            "GEOMETRY-STAR-DISTANCE": self.star_distance,
+            "GEOMETRY-ROTATION": self.rotation,
+            "GEOMETRY-BRDFSCALER": self.brdfscaler
+        }
+        config = {k: str(v) for k, v in config.items()}
+        return config
 
 class PSG_Atmosphere(PSG_Config):
     # from https://hitran.org/docs/molec-meta/
@@ -127,7 +385,7 @@ class PSG_Atmosphere(PSG_Config):
             else []
         )
         unit = (
-            [units.Unit(v) for v in config["ATMOSPHERE-UNIT"].split(",")]
+            [u.Unit(v) for v in config["ATMOSPHERE-UNIT"].split(",")]
             if "ATMOSPHERE-UNIT" in config.keys()
             else []
         )
@@ -152,7 +410,7 @@ class PSG_Atmosphere(PSG_Config):
             else []
         )
         unit = (
-            [units.Unit(v) for v in config["ATMOSPHERE-AUNIT"].split(",")]
+            [u.Unit(v) for v in config["ATMOSPHERE-AUNIT"].split(",")]
             if "ATMOSPHERE-AUNIT" in config.keys()
             else []
         )
@@ -164,7 +422,7 @@ class PSG_Atmosphere(PSG_Config):
             else []
         )
         unit = (
-            [units.Unit(v) for v in config["ATMOSPHERE-ASUNI"].split(",")]
+            [u.Unit(v) for v in config["ATMOSPHERE-ASUNI"].split(",")]
             if "ATMOSPHERE-ASUNI" in config.keys()
             else []
         )
@@ -185,7 +443,6 @@ class PSG_Atmosphere(PSG_Config):
         self.layer = np.genfromtxt(layers, delimiter=",")
         #:str: Parameters defining the 3D General Circulation Model grid: num_lons, num_lats, num_alts, lon0, lat0, delta_lon, delta_lat, variables (csv)
         self.gcm_parameters = config.get("ATMOSPHERE-GCM-PARAMETERS", "")
-
         #:str: The structure of the atmosphere, None / Equilibrium:'Hydrostatic equilibrium' / Coma:'Cometary expanding coma'
         self.structure = config["ATMOSPHERE-STRUCTURE"]
         #:float: For equilibrium atmospheres, this field defines the surface pressure; while for cometary coma, this field indicates the gas production rate
@@ -207,23 +464,14 @@ class PSG_Atmosphere(PSG_Config):
         #:str: Description establishing the source/reference for the vertical profile
         self.description = config["ATMOSPHERE-DESCRIPTION"]
 
-        # Store all the other atmosphere parameters
-        self.other = {}
-        for key, value in config.items():
-            match = re.match(r"ATMOSPHERE-(.*?)(-\d+)?$", key)
-            if match is not None and match[1].lower().replace("-", "_") not in dir(
-                self
-            ):
-                self.other[key] = value
-
     def to_config(self):
         config = {
-            "ATMOSPHERE-NGAS": str(self.ngas),
+            "ATMOSPHERE-NGAS": self.ngas,
             "ATMOSPHERE-GAS": ",".join([str(v) for v in self.gas]),
             "ATMOSPHERE-TYPE": ",".join([str(v) for v in self.type]),
             "ATMOSPHERE-ABUN": ",".join([str(v.value) for v in self.abun]),
             "ATMOSPHERE-UNIT": ",".join([str(v.unit) for v in self.abun]),
-            "ATMOSPHERE-NAERO": str(self.naero),
+            "ATMOSPHERE-NAERO": self.naero,
             "ATMOSPHERE-AEROS": ",".join([str(v) for v in self.aeros]),
             "ATMOSPHERE-ATYPE": ",".join([str(v) for v in self.atype]),
             "ATMOSPHERE-AABUN": ",".join([str(v.value) for v in self.aabun]),
@@ -233,27 +481,26 @@ class PSG_Atmosphere(PSG_Config):
             "ATMOSPHERE-LAYERS-MOLECULES": ",".join(
                 [str(v) for v in self.layers_molecules]
             ),
-            "ATMOSPHERE-LAYERS": str(self.layers),
-            "ATMOSPHERE-STRUCTURE": str(self.structure),
-            "ATMOSPHERE-PRESSURE": str(self.pressure),
-            "ATMOSPHERE-PUNIT": str(self.punit),
-            "ATMOSPHERE-TEMPERATURE": str(self.temperature),
-            "ATMOSPHERE-WEIGHT": str(self.weight),
-            "ATMOSPHERE-CONTINUUM": str(self.continuum),
-            "ATMOSPHERE-TAU": str(self.tau),
-            "ATMOSPHERE-NMAX": str(self.nmax),
-            "ATMOSPHERE-LMAX": str(self.lmax),
-            "ATMOSPHERE-DESCRIPTION": str(self.description),
-            "ATMOSPHERE-GCM-PARAMETERS": str(self.gcm_parameters),
+            "ATMOSPHERE-LAYERS": self.layers,
+            "ATMOSPHERE-STRUCTURE": self.structure,
+            "ATMOSPHERE-PRESSURE": self.pressure,
+            "ATMOSPHERE-PUNIT": self.punit,
+            "ATMOSPHERE-TEMPERATURE": self.temperature,
+            "ATMOSPHERE-WEIGHT": self.weight,
+            "ATMOSPHERE-CONTINUUM": self.continuum,
+            "ATMOSPHERE-TAU": self.tau,
+            "ATMOSPHERE-NMAX": self.nmax,
+            "ATMOSPHERE-LMAX": self.lmax,
+            "ATMOSPHERE-DESCRIPTION": self.description,
+            "ATMOSPHERE-GCM-PARAMETERS": self.gcm_parameters,
         }
         for i in range(1, self.layers + 1):
             config[f"ATMOSPHERE-LAYER-{i}"] = np.array2string(
                 self.layer[i - 1], separator=",", max_line_width=np.inf
             )[1:-1]
 
-        other = self.other.copy()
-        other.update(config)
-        return other
+        config = {k:str(v) for k,v in config.items()}
+        return config
 
     @property
     def gas(self):
@@ -523,10 +770,12 @@ class PSG:
                 config = self.read_config(config)
             except FileNotFoundError:
                 config = config
-        self.config = config
+        self._config = config
 
         # Pass config to substructures
-        self.atmosphere = PSG_Atmosphere(self.config)
+        self.object = PSG_Object(self._config)
+        self.geometry = PSG_Geometry(self._config)
+        self.atmosphere = PSG_Atmosphere(self._config)
 
         # Load the individual packages for object oriented interface
         versions = self.get_package_version()
@@ -534,6 +783,10 @@ class PSG:
             name: cls(self, versions.get(name, ""))
             for name, cls in self._packages.items()
         }
+
+    @property
+    def config(self):
+        return self.to_config()
 
     @staticmethod
     def read_config(config_file):
@@ -545,8 +798,10 @@ class PSG:
         return config
 
     def to_config(self):
-        self.config.update(self.atmosphere.to_config())
-        return self.config
+        self._config.update(self.object.to_config())
+        self._config.update(self.geometry.to_config())
+        self._config.update(self.atmosphere.to_config())
+        return self._config
 
     def write_config(self, config_file=None):
         config = self.to_config()
